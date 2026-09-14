@@ -1,0 +1,4 @@
+# 仓库内存 LF，签出时按类型还原换行符
+* text=auto
+# 批处理文件必须用 CRLF，否则部分环境下 cmd 解析异常
+*.bat text eol=crlf

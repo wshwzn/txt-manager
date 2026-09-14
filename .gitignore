@@ -1,0 +1,12 @@
+# 运行时配置：由程序自己生成和改写，内含本机绝对路径，不入库
+config.json
+
+# 本程序零第三方依赖，以下仅作兜底
+node_modules/
+package-lock.json
+
+# 系统/编辑器杂项
+Thumbs.db
+Desktop.ini
+.DS_Store
+*.log
