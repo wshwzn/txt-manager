@@ -8,6 +8,7 @@
 // 左侧文件列表 + 右侧查看/编辑，支持 UTF-8 / GBK 自动识别
 const http = require('http');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const vm = require('vm');
 const { TextDecoder } = require('util');
@@ -16,7 +17,10 @@ const { TextDecoder } = require('util');
 // 首次启动若没有 config.json，就用这里；在页面里切换目录后会记住，之后不再看这个默认值
 const DEFAULT_DOC_DIR = __dirname;
 const PORT = 5177;
-const HOST = '127.0.0.1';
+// 监听所有网卡，手机在同一网络下才能连进来
+const HOST = '0.0.0.0';
+// 但拼地址、开浏览器必须用具体地址：0.0.0.0 不是能访问的地址
+const LOCAL_HOST = '127.0.0.1';
 
 // 配置存放位置：与程序同目录（doc-manager\config.json）
 const CONFIG_PATH = path.join(__dirname, 'config.json');
@@ -28,11 +32,23 @@ function loadConfig() {
 const _cfg = loadConfig();
 let DOC_DIR = (_cfg.dir && fs.existsSync(_cfg.dir)) ? _cfg.dir : DEFAULT_DOC_DIR;
 let RECENT_DIRS = Array.isArray(_cfg.recent) ? _cfg.recent.slice(0, 8) : [];
+
+// 访问口令：这道关卡是为「手机从局域网连进来」准备的
+// （服务监听 0.0.0.0，若所在网络能公网访问，没有口令等于把文件摊开给别人看）
+function randomPin() { return String(Math.floor(100000 + Math.random() * 900000)); }
+let CONFIG_PIN = String(_cfg.pin || '');
+let PIN_IS_NEW = false;
+if (!CONFIG_PIN) { CONFIG_PIN = randomPin(); PIN_IS_NEW = true; }
+// 环境变量 DOC_MGR_PIN 只作临时覆盖，不会写回配置（忘记口令时救急用）
+const ACCESS_PIN = String(process.env.DOC_MGR_PIN || CONFIG_PIN);
+
 function saveConfig() {
   try {
-    fs.writeFileSync(CONFIG_PATH, JSON.stringify({ dir: DOC_DIR, recent: RECENT_DIRS }, null, 2), 'utf-8');
+    fs.writeFileSync(CONFIG_PATH, JSON.stringify({ dir: DOC_DIR, recent: RECENT_DIRS, pin: CONFIG_PIN }, null, 2), 'utf-8');
   } catch (e) { /* 配置写入失败不影响使用 */ }
 }
+// 新生成的口令立刻落盘：否则后续任何一次写配置（切换目录等）都会把它冲掉，下次又换一个
+if (PIN_IS_NEW) saveConfig();
 
 // ---------- 工具函数 ----------
 function safeResolve(name) {
@@ -328,6 +344,14 @@ const PAGE_HTML = `<!DOCTYPE html>
     flex-shrink: 0; min-height: 54px;
   }
   .doc-title { font-size: 15px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+  /* 返回列表按钮：只在手机端出现，宽屏下不显示（宽屏本来就能同时看到列表） */
+  .back-btn {
+    display: none; flex-shrink: 0;
+    border: 1px solid var(--input-border); background: var(--panel); color: var(--text);
+    padding: 7px 12px; border-radius: 6px; font-size: 13px; cursor: pointer;
+    font-family: inherit;
+  }
+  .back-btn:hover { border-color: var(--accent); color: var(--accent); }
   .enc-badge {
     font-size: 11px; color: var(--chip-text); background: var(--chip-bg);
     border-radius: 4px; padding: 2px 7px; flex-shrink: 0;
@@ -445,6 +469,71 @@ const PAGE_HTML = `<!DOCTYPE html>
   .pick-item { font-size: 13px; padding: 7px 10px; border-radius: 5px; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .pick-item:hover { background: var(--accent-soft-2); color: var(--accent-text); }
   .modal button:disabled { color: var(--muted-3); cursor: default; }
+
+  /* ============================================================
+     手机端（窄屏）
+     思路：桌面版是「左列表 + 右正文」并排，手机宽度放不下，所以改成两屏——
+     打开页面先看铺满整屏的列表，点某个文件后整屏换成正文，左上角「返回」回列表。
+     切换靠 body 上的 mobile-reading 类，宽屏下这个类没有任何效果。
+     ============================================================ */
+  @media (max-width: 720px) {
+    /* 用 dvh 避免手机浏览器地址栏收起/展开时页面高度跳变 */
+    html, body { height: 100dvh; }
+
+    header { flex-wrap: wrap; padding: 10px 12px; row-gap: 8px; }
+    header .logo { display: none; }
+    header h1 { display: none; }                       /* 窄屏省掉标题，把空间让给路径和按钮 */
+    header > div { flex: 1 1 100%; order: -1; }        /* 目录路径独占第一行 */
+    header .path { font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    header .refresh-btn { padding: 8px 11px; font-size: 12.5px; }
+    header .push-right { margin-left: 0; }             /* 换行后不再靠右推，按钮整排左对齐 */
+    header .ext-btn { min-width: 0; }
+    header .icon-btn { min-width: 40px; }
+
+    /* 两屏切换 */
+    .sidebar { width: 100% !important; flex: 1; }
+    .resizer { display: none; }                        /* 手机上不需要拖宽度 */
+    .content { display: none; }
+    body.mobile-reading .sidebar { display: none; }
+    body.mobile-reading .content { display: flex; }
+
+    /* 列表：手指点得准一些 */
+    .sidebar input[type=text] { font-size: 15px; padding: 9px 12px; }
+    .new-btn { padding: 9px 14px; font-size: 13.5px; }
+    .file-item { padding: 12px; }
+    .file-item .fname { font-size: 15px; }
+    .file-item .fmeta { font-size: 12px; margin-top: 4px; }
+    /* 触屏没有 hover，删除按钮必须常显，否则手机上根本删不掉 */
+    .file-item .del-x { display: block; font-size: 14px; padding: 0 6px; }
+
+    /* 正文页顶栏：第一行「返回 / 文件名 / 保存」，其余按钮换到第二行 */
+    body.mobile-reading header { display: none; }   /* 阅读时收起应用顶栏，把高度让给正文 */
+    .doc-header { padding: 10px 12px; gap: 8px; row-gap: 8px; flex-wrap: wrap; }
+    .doc-header > * { order: 9; }                   /* 默认往后排，下面几个用 order 提到前面 */
+    .doc-header .back-btn { order: 1; display: inline-block; padding: 8px 13px; font-size: 14px; }
+    .doc-header .doc-title { order: 2; flex: 1 1 auto; min-width: 0; font-size: 14px; }
+    .doc-header .save-btn { order: 3; margin-left: 0; padding: 9px 16px; font-size: 14px; }
+    .doc-header .enc-badge { order: 4; font-size: 11px; }
+    .doc-header .status-text { order: 5; font-size: 11.5px; }
+    .doc-header .view-tools { order: 6; gap: 6px; }
+    .doc-header .del-btn { order: 7; padding: 9px 14px; font-size: 14px; }
+    .tool-btn { padding: 8px 12px; font-size: 14px; }
+
+    textarea.editor {
+      padding: 14px;
+      /* 手机上一律折行：横向拖长行太难受 */
+      white-space: pre-wrap; overflow-wrap: break-word; overflow-x: hidden;
+      /* 不低于 16px —— iOS 在输入框字号小于 16px 时会把整页放大 */
+      font-size: max(16px, var(--editor-fs, 14px));
+    }
+    /* 折行已强制开启，这个开关在手机上没有意义 */
+    #wrapBtn { display: none; }
+
+    /* 弹窗：宽度自适应，高度留出余量，内容多时内部滚动 */
+    .modal { width: calc(100vw - 32px) !important; max-height: 86dvh; overflow-y: auto; }
+    .pick-list { height: 200px; }
+    .modal .btns button { padding: 10px 14px; font-size: 14px; }
+  }
 </style>
 </head>
 <body>
@@ -538,6 +627,18 @@ const PAGE_HTML = `<!DOCTYPE html>
 </div>
 
 <script>
+  // 会话只存在服务端内存里，重启服务后就失效了。
+  // 这里统一兜住：任何接口返回 401 就回登录页，避免页面「点了没反应」却看不出原因。
+  (function () {
+    const raw = window.fetch;
+    window.fetch = function () {
+      return raw.apply(this, arguments).then(function (res) {
+        if (res.status === 401) location.href = '/';
+        return res;
+      });
+    };
+  })();
+
   let files = [];
   let current = null;        // 当前打开的文件名
   let dirty = false;         // 有未保存修改
@@ -576,6 +677,9 @@ const PAGE_HTML = `<!DOCTYPE html>
 
   async function openFile(name) {
     if (dirty && current && current !== name && !confirm('当前文档有未保存的修改，直接切换将丢失修改。确定切换吗？')) return;
+    // 点的就是当前这个文件：不重新从磁盘读，只切回正文视图。
+    // （手机端「返回列表 → 再点回同一文件」很常见，若重新读盘会静默覆盖未保存的修改）
+    if (name === current) { document.body.classList.add('mobile-reading'); return; }
     const res = await fetch('/api/file?name=' + encodeURIComponent(name));
     if (!res.ok) { alert('读取失败：' + (await res.text())); return; }
     const data = await res.json();
@@ -585,6 +689,7 @@ const PAGE_HTML = `<!DOCTYPE html>
     if (data.binary) {
       document.getElementById('contentArea').innerHTML =
         '<div class="doc-header">' +
+        '<button class="back-btn" onclick="closeDoc()">返回</button>' +
         '<div class="doc-title">' + escapeHtml(name) + '</div>' +
         '<span class="enc-badge">' + escapeHtml(data.encoding) + '</span>' +
         '<button class="del-btn" id="delBtn" onclick="askDelete(current)">删除</button>' +
@@ -592,11 +697,13 @@ const PAGE_HTML = `<!DOCTYPE html>
         '<div class="placeholder"><div style="font-size:40px;">🚫</div>' +
         '<div>这不是文本文件（如快捷方式、程序、图片、压缩包等）</div>' +
         '<div style="font-size:12px;color:var(--muted-3);">为避免损坏文件，已禁止在此编辑；如需删除请用上方按钮</div></div>';
+      document.body.classList.add('mobile-reading');   // 手机端：切到正文屏
       renderList();
       return;
     }
     document.getElementById('contentArea').innerHTML =
       '<div class="doc-header">' +
+      '<button class="back-btn" onclick="closeDoc()">返回</button>' +
       '<div class="doc-title">' + escapeHtml(name) + '</div>' +
       '<span class="enc-badge">编码: ' + escapeHtml(data.encoding) + '</span>' +
       '<span class="status-text" id="statusText"></span>' +
@@ -614,8 +721,10 @@ const PAGE_HTML = `<!DOCTYPE html>
     editor.addEventListener('input', () => { setDirty(true); });
     applyFontSize(editorFS);
     applyWrap(autoWrap);
+    document.body.classList.add('mobile-reading');   // 手机端：切到正文屏
     renderList();
-    editor.focus();
+    // 手机上不自动聚焦：那会立刻弹出软键盘，把正文挤掉一半
+    if (!isNarrow()) editor.focus();
   }
 
   function setDirty(v) {
@@ -885,10 +994,18 @@ const PAGE_HTML = `<!DOCTYPE html>
     }
   }
 
+  // 手机端：窄屏判断，断点与 CSS 里的媒体查询保持一致
+  function isNarrow() { return window.matchMedia('(max-width: 720px)').matches; }
+
+  // 手机端「返回」：只切回列表屏，不关闭文档
+  // （未保存的内容与脏标记都还在，再点同一文件会直接回到正文，不会重新读盘）
+  function closeDoc() { document.body.classList.remove('mobile-reading'); }
+
   function showPlaceholder() {
+    document.body.classList.remove('mobile-reading');   // 回到列表屏（仅手机端有可见效果）
     document.getElementById('contentArea').innerHTML =
       '<div class="placeholder"><div style="font-size:40px;">📄</div>' +
-      '<div>从左侧选择一个文档开始阅读 / 编辑</div>' +
+      '<div>从列表里选择一个文档开始阅读 / 编辑</div>' +
       '<div style="font-size:12px;color:var(--muted-3);">支持 Ctrl+S 快捷保存</div></div>';
   }
 
@@ -1054,13 +1171,146 @@ const PAGE_HTML = `<!DOCTYPE html>
 </body>
 </html>`;
 
+// ---------- 访问口令（登录页 / 会话 / 限速） ----------
+// 除了首页和登录接口，其余请求都要求带一个登录后签发的 cookie。
+// 会话只存在内存里：重启服务后所有人需要重新输一次口令（这是有意的，别改成落盘）。
+const crypto = require('crypto');
+const SESSIONS = new Set();       // 已登录的会话令牌
+const LOGIN_FAILS = new Map();    // ip -> { n: 连续失败次数, until: 锁定到期时间 }
+const MAX_FAILS = 5;              // 连续错 5 次
+const LOCK_MS = 5 * 60 * 1000;    // 锁 5 分钟
+const SESSION_DAYS = 365;         // 手机浏览器记住登录的时长
+const COOKIE_NAME = 'docmgr_sid';
+
+function newToken() { return crypto.randomBytes(24).toString('hex'); }
+
+function parseCookies(req) {
+  const out = {};
+  (req.headers.cookie || '').split(';').forEach(part => {
+    const i = part.indexOf('=');
+    if (i > 0) out[part.slice(0, i).trim()] = part.slice(i + 1).trim();
+  });
+  return out;
+}
+function clientIp(req) { return (req.socket && req.socket.remoteAddress) || 'unknown'; }
+// 本机（回环地址）直接放行：这台电脑上的浏览器不必输口令
+// （能在这台机器上发起请求的进程，本来就能直接读这些文件，口令挡不住也没必要挡）
+function isLoopback(req) {
+  const ip = clientIp(req);
+  return ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1';
+}
+function isAuthed(req) {
+  if (isLoopback(req)) return true;
+  const sid = parseCookies(req)[COOKIE_NAME];
+  return !!sid && SESSIONS.has(sid);
+}
+// 定时比较，避免通过响应时间猜口令
+function pinEquals(a, b) {
+  const ba = Buffer.from(String(a)), bb = Buffer.from(String(b));
+  if (ba.length !== bb.length) return false;
+  return crypto.timingSafeEqual(ba, bb);
+}
+
+// 登录页：只用固定文案，不拼接任何用户输入，所以无需转义
+function loginPage() {
+  return '<!DOCTYPE html>\n<html lang="zh-CN">\n<head>\n<meta charset="utf-8">\n' +
+    '<meta name="viewport" content="width=device-width, initial-scale=1.0">\n' +
+    '<title>文档管理器</title>\n<style>\n' +
+    'body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;'
+    + 'background:#f5f6f8;color:#2c3e50;font-family:"Microsoft YaHei","PingFang SC",sans-serif;}\n' +
+    '.box{width:calc(100vw - 56px);max-width:330px;background:#fff;border-radius:12px;padding:26px 22px;'
+    + 'box-shadow:0 8px 30px rgba(0,0,0,.12);text-align:center;}\n' +
+    'h1{font-size:17px;margin:0 0 6px;font-weight:600;}\n' +
+    'p{margin:0 0 16px;font-size:12.5px;color:#7a8290;line-height:1.6;}\n' +
+    'input{width:100%;box-sizing:border-box;font-size:22px;letter-spacing:6px;text-align:center;'
+    + 'padding:12px 8px;border:1px solid #d8dce3;border-radius:8px;outline:none;background:#fff;color:#2c3e50;}\n' +
+    'input:focus{border-color:#4a90d9;}\n' +
+    'button{width:100%;margin-top:14px;padding:13px;font-size:15px;border:none;border-radius:8px;'
+    + 'background:#4a90d9;color:#fff;cursor:pointer;font-family:inherit;}\n' +
+    'button:disabled{opacity:.55;}\n' +
+    '.err{min-height:18px;margin-top:12px;font-size:12.5px;color:#d9534f;}\n' +
+    '@media (prefers-color-scheme:dark){body{background:#1b1d21;color:#d6dae1;}\n' +
+    '.box{background:#24262b;box-shadow:0 8px 30px rgba(0,0,0,.55);}\n' +
+    'p{color:#8b93a1;}input{background:#2b2e34;border-color:#41454d;color:#d6dae1;}}\n' +
+    '</style>\n</head>\n<body>\n<div class="box">\n' +
+    '<h1>文档管理器</h1>\n<p>请输入访问口令</p>\n' +
+    '<input id="pin" type="password" inputmode="numeric" autocomplete="off" maxlength="32">\n' +
+    '<button id="go">进 入</button>\n<div class="err" id="err"></div>\n</div>\n' +
+    '<script>\n' +
+    '(function(){\n' +
+    '  var inp = document.getElementById("pin");\n' +
+    '  var btn = document.getElementById("go");\n' +
+    '  var err = document.getElementById("err");\n' +
+    '  function go(){\n' +
+    '    var v = inp.value.trim();\n' +
+    '    if (!v) { err.textContent = "请输入口令"; return; }\n' +
+    '    btn.disabled = true; err.textContent = "";\n' +
+    '    fetch("/api/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ pin: v }) })\n' +
+    '      .then(function(r){ return r.json().then(function(d){ return { ok: r.ok, d: d }; }); })\n' +
+    '      .then(function(res){\n' +
+    '        if (res.ok) { location.href = "/"; return; }\n' +
+    '        err.textContent = (res.d && res.d.message) || "口令不对";\n' +
+    '        btn.disabled = false; inp.select();\n' +
+    '      })\n' +
+    '      .catch(function(){ err.textContent = "连接失败，请重试"; btn.disabled = false; });\n' +
+    '  }\n' +
+    '  btn.addEventListener("click", go);\n' +
+    '  inp.addEventListener("keydown", function(e){ if (e.key === "Enter") go(); });\n' +
+    '  inp.focus();\n' +
+    '})();\n' +
+    '</script>\n</body>\n</html>';
+}
+
 // ---------- HTTP 服务 ----------
 const server = http.createServer((req, res) => {
-  const url = new URL(req.url, `http://${HOST}:${PORT}`);
+  const url = new URL(req.url, `http://${LOCAL_HOST}:${PORT}`);
 
+  // 首页：已登录给应用，未登录只给登录页
   if (req.method === 'GET' && url.pathname === '/') {
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-    res.end(PAGE_HTML);
+    res.end(isAuthed(req) ? PAGE_HTML : loginPage());
+    return;
+  }
+
+  // 登录：口令正确则签发一个长期 cookie（手机浏览器只需输一次）
+  if (req.method === 'POST' && url.pathname === '/api/login') {
+    const ip = clientIp(req);
+    const rec = LOGIN_FAILS.get(ip);
+    if (rec && rec.until && Date.now() < rec.until) {
+      const mins = Math.ceil((rec.until - Date.now()) / 60000);
+      res.writeHead(429, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ message: '尝试次数过多，请 ' + mins + ' 分钟后再试' }));
+      return;
+    }
+    let body = '';
+    req.on('data', c => body += c);
+    req.on('end', () => {
+      let pin = '';
+      try { pin = String(JSON.parse(body).pin || ''); } catch (e) { /* 请求体不合法按空口令处理 */ }
+      if (pinEquals(pin, ACCESS_PIN)) {
+        LOGIN_FAILS.delete(ip);
+        const sid = newToken();
+        SESSIONS.add(sid);
+        res.writeHead(200, {
+          'Content-Type': 'application/json; charset=utf-8',
+          'Set-Cookie': COOKIE_NAME + '=' + sid + '; Path=/; Max-Age=' + (SESSION_DAYS * 86400) + '; HttpOnly; SameSite=Lax'
+        });
+        res.end(JSON.stringify({ ok: true }));
+        return;
+      }
+      const n = (rec && rec.n ? rec.n : 0) + 1;
+      const locked = n >= MAX_FAILS;
+      LOGIN_FAILS.set(ip, locked ? { n: n, until: Date.now() + LOCK_MS } : { n: n, until: 0 });
+      res.writeHead(locked ? 429 : 401, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ message: locked ? '尝试次数过多，请 5 分钟后再试' : '口令不对' }));
+    });
+    return;
+  }
+
+  // 其余一律要求已登录
+  if (!isAuthed(req)) {
+    res.writeHead(401, { 'Content-Type': 'text/plain; charset=utf-8' });
+    res.end('未登录');
     return;
   }
 
@@ -1225,11 +1475,27 @@ const server = http.createServer((req, res) => {
 
 function openBrowser() {
   if (process.env.DOC_MGR_NO_OPEN) return; // 供后台/测试启动使用
+  // 注意用 LOCAL_HOST：0.0.0.0 不是能访问的地址，浏览器打不开
   require('child_process').exec(
-    `start "" http://${HOST}:${PORT}`,
+    `start "" http://${LOCAL_HOST}:${PORT}`,
     { shell: 'cmd.exe' },
     () => {}
   );
+}
+
+// 列出本机可供手机访问的地址（虚拟网卡大多连不通，排除掉免得误导）
+function lanAddresses() {
+  const out = [];
+  const ifaces = os.networkInterfaces();
+  Object.keys(ifaces).forEach(name => {
+    (ifaces[name] || []).forEach(a => {
+      if (a.family !== 'IPv4' || a.internal) return;
+      if (a.address.startsWith('169.254.')) return;                 // 没连上网络时的自动地址
+      if (/^192\.168\.(56|80|100)\.1$/.test(a.address)) return;     // VirtualBox / VMware 的虚拟网卡
+      out.push({ name: name, address: a.address });
+    });
+  });
+  return out;
 }
 
 server.on('error', (err) => {
@@ -1277,7 +1543,16 @@ function selfCheckPageScript() {
 }
 
 server.listen(PORT, HOST, () => {
-  console.log(`文档管理器已启动: http://${HOST}:${PORT}`);
+  console.log(`文档管理器已启动: http://${LOCAL_HOST}:${PORT}`);
+  const lan = lanAddresses();
+  if (lan.length) {
+    console.log('手机访问（要和这台电脑连同一个网络）:');
+    lan.forEach(a => console.log(`    http://${a.address}:${PORT}    [${a.name}]`));
+  } else {
+    console.log('（没找到可用的局域网地址，手机暂时连不上）');
+  }
+  console.log(`访问口令: ${ACCESS_PIN}` + (PIN_IS_NEW ? '  ← 这是新生成的口令，请记下' : ''));
+  console.log('  手机首次打开需要输入；想换口令就改 config.json 里的 pin');
   console.log(`文档目录: ${DOC_DIR}`);
   if (selfCheckPageScript()) console.log('页面脚本自检通过。');
   console.log('关闭此窗口即停止服务。');
