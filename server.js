@@ -426,10 +426,18 @@ const PAGE_HTML = `<!DOCTYPE html>
   .dir-recent-title { font-size: 12px; color: var(--muted); margin-bottom: 6px; }
   .dir-item {
     font-size: 12.5px; color: var(--text); background: var(--item-bg);
-    border-radius: 6px; padding: 6px 10px; margin-bottom: 5px;
-    cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    border-radius: 6px; padding: 6px 8px 6px 10px; margin-bottom: 5px;
+    cursor: pointer; white-space: nowrap; overflow: hidden;
+    display: flex; align-items: center; gap: 6px;
   }
   .dir-item:hover { background: var(--accent-soft-2); color: var(--accent-text); }
+  .dir-item .dir-name { flex: 1; overflow: hidden; text-overflow: ellipsis; }
+  .dir-del {
+    flex: none; width: 17px; height: 17px; line-height: 15px; text-align: center;
+    border-radius: 50%; font-size: 14px; color: var(--muted-3); cursor: pointer;
+    user-select: none;
+  }
+  .dir-del:hover { color: var(--danger); background: var(--danger-soft); }
   .dir-empty { font-size: 12.5px; color: var(--muted-3); }
   .pick-path { font-size: 12.5px; color: var(--text); background: var(--bg); border: 1px solid var(--border-soft); border-radius: 6px; padding: 7px 10px; margin-bottom: 10px; min-height: 32px; word-break: break-all; }
   .pick-list { height: 240px; overflow-y: auto; border: 1px solid var(--border-soft); border-radius: 6px; padding: 4px; }
@@ -736,17 +744,42 @@ const PAGE_HTML = `<!DOCTYPE html>
 
   function renderRecent(list) {
     const box = document.getElementById('dirRecentList');
-    if (!list || !list.length) { box.innerHTML = '<div class="dir-empty">暂无</div>'; return; }
+    if (!list || !list.length) { box.innerHTML = '<div class="dir-empty">暂无</div>'; box.onclick = null; return; }
     box.innerHTML = list.map(d =>
-      '<div class="dir-item" title="' + escapeAttr(d) + '" data-d="' + escapeAttr(d) + '">' + escapeHtml(d) + '</div>'
+      '<div class="dir-item" title="' + escapeAttr(d) + '" data-d="' + escapeAttr(d) + '">' +
+        '<span class="dir-name">' + escapeHtml(d) + '</span>' +
+        '<span class="dir-del" data-del="' + escapeAttr(d) + '" title="从最近使用中移除（只删记录，不动文件夹）">&times;</span>' +
+      '</div>'
     ).join('');
     // 点击填入输入框：用事件委托绑定，避免在内联 onclick 里嵌套引号
     // （内联写法在模板字符串里转义层数太多，曾经吞掉反斜杠导致整段脚本语法错误）
+    // 点右侧的 × 则是移除记录，不再填入——所以要先判断点击目标
     box.onclick = function (e) {
-      const el = e.target.closest ? e.target.closest('.dir-item') : null;
+      const t = e.target;
+      const del = t.closest ? t.closest('.dir-del') : null;
+      if (del) { e.stopPropagation(); removeRecent(del.getAttribute('data-del')); return; }
+      const el = t.closest ? t.closest('.dir-item') : null;
       if (!el) return;
       document.getElementById('dirInput').value = el.dataset.d;
     };
+  }
+
+  // 移除一条「最近使用」记录（仅服务端历史列表，不影响当前目录）
+  async function removeRecent(dir) {
+    const msg = document.getElementById('dirMsg');
+    try {
+      const res = await fetch('/api/dir/remove', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ dir: dir })
+      });
+      if (!res.ok) throw new Error(await res.text());
+      const d = await res.json();
+      renderRecent(d.recent);
+      msg.textContent = '';
+    } catch (e) {
+      msg.textContent = '移除失败：' + e.message;
+    }
   }
 
   async function openDirModal() {
@@ -1150,6 +1183,27 @@ const server = http.createServer((req, res) => {
         res.end(JSON.stringify({ dir: DOC_DIR, recent: RECENT_DIRS, count: listFiles().length }));
       } catch (e) {
         res.writeHead(500); res.end('切换失败: ' + e.message);
+      }
+    });
+    return;
+  }
+
+  // 从「最近使用」里移除一条记录
+  // 只影响历史列表，不动当前目录、也不碰磁盘上的文件夹
+  if (req.method === 'POST' && url.pathname === '/api/dir/remove') {
+    let body = '';
+    req.on('data', c => body += c);
+    req.on('end', () => {
+      try {
+        const { dir } = JSON.parse(body);
+        const target = String(dir == null ? '' : dir).trim();
+        if (!target) { res.writeHead(400); res.end('缺少目录'); return; }
+        RECENT_DIRS = RECENT_DIRS.filter(d => d !== target);
+        saveConfig();
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ dir: DOC_DIR, recent: RECENT_DIRS }));
+      } catch (e) {
+        res.writeHead(500); res.end('移除失败: ' + e.message);
       }
     });
     return;
