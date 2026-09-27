@@ -2,3 +2,5 @@
 * text=auto
 # 批处理文件必须用 CRLF，否则部分环境下 cmd 解析异常
 *.bat text eol=crlf
+# 第三方压缩库按原样存储，不做行尾转换，保持与官方发布文件字节一致
+lib/*.js -text

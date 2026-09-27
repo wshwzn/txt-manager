@@ -25,6 +25,10 @@ const LOCAL_HOST = '127.0.0.1';
 // 配置存放位置：与程序同目录（doc-manager\config.json）
 const CONFIG_PATH = path.join(__dirname, 'config.json');
 
+// Markdown 渲染库：放在程序目录的 lib\ 下，由本服务按固定路径提供
+// （路径写死在这里，不用 URL 拼路径，所以没有目录穿越的可能）
+const MD_LIB_PATH = path.join(__dirname, 'lib', 'markdown-it.min.js');
+
 // ---------- 配置持久化（记住当前目录 + 最近使用的目录） ----------
 function loadConfig() {
   try { return JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf-8')); } catch (e) { return {}; }
@@ -377,6 +381,79 @@ const PAGE_HTML = `<!DOCTYPE html>
     white-space: pre-wrap; overflow-wrap: break-word; overflow-x: hidden;
   }
 
+  /* ---------- Markdown 渲染视图 ---------- */
+  /* 默认隐藏；body 上挂 md-on 时才顶掉编辑框（编辑框只是藏起来，内容与保存逻辑不动） */
+  .md-view {
+    flex: 1; display: none; overflow: auto; min-height: 0;
+    padding: 20px 24px; background: var(--panel); color: var(--text);
+    font-size: var(--editor-fs, 14px); line-height: 1.8;
+    font-family: "Microsoft YaHei", Consolas, sans-serif;
+    overflow-wrap: break-word; word-break: break-word;
+  }
+  body.md-on .md-view { display: block; }
+  body.md-on textarea.editor { display: none; }
+  /* 渲染模式下必然折行，这个开关没有意义 */
+  body.md-on #wrapBtn { display: none; }
+
+  .md-view > *:first-child { margin-top: 0; }
+  .md-view h1, .md-view h2, .md-view h3,
+  .md-view h4, .md-view h5, .md-view h6 {
+    margin: 1.3em 0 .6em; line-height: 1.35; font-weight: 600;
+  }
+  .md-view h1 { font-size: 1.7em; padding-bottom: .3em; border-bottom: 1px solid var(--border); }
+  .md-view h2 { font-size: 1.42em; padding-bottom: .3em; border-bottom: 1px solid var(--border-soft); }
+  .md-view h3 { font-size: 1.2em; }
+  .md-view h4 { font-size: 1.05em; }
+  .md-view h5, .md-view h6 { font-size: 1em; color: var(--muted); }
+  .md-view p { margin: .85em 0; }
+  .md-view ul, .md-view ol { margin: .85em 0; padding-left: 1.9em; }
+  .md-view li { margin: .3em 0; }
+  .md-view li > ul, .md-view li > ol { margin: .3em 0; }
+  .md-view blockquote {
+    margin: .9em 0; padding: .25em 1em; border-radius: 0 6px 6px 0;
+    border-left: 3px solid var(--border); background: var(--item-bg); color: var(--muted);
+  }
+  .md-view code {
+    font-family: Consolas, monospace; font-size: .92em;
+    background: var(--item-bg); padding: .15em .4em; border-radius: 4px;
+  }
+  .md-view pre {
+    margin: .9em 0; padding: 12px 14px; border-radius: 8px;
+    background: var(--item-bg); border: 1px solid var(--border-soft); overflow-x: auto;
+  }
+  .md-view pre code { background: none; padding: 0; font-size: .92em; }
+  .md-view a { color: var(--accent-text); text-decoration: none; }
+  .md-view a:hover { text-decoration: underline; }
+  .md-view hr { border: none; border-top: 1px solid var(--border); margin: 1.5em 0; }
+  .md-view table {
+    border-collapse: collapse; margin: .9em 0;
+    display: block; max-width: 100%; overflow-x: auto;
+  }
+  .md-view th, .md-view td { border: 1px solid var(--border); padding: 6px 12px; }
+  .md-view th { background: var(--item-bg); font-weight: 600; }
+  .md-view img { max-width: 100%; border-radius: 6px; }
+  .md-view input[type=checkbox] { margin-right: .4em; }
+
+  /* 图片不自动加载：先画一个占位框，点一下才真的去请求 */
+  .md-view .md-img {
+    display: inline-flex; align-items: center; gap: 8px; max-width: 100%;
+    padding: 8px 12px; margin: .25em 0; vertical-align: middle;
+    border: 1px dashed var(--input-border); border-radius: 6px;
+    background: var(--item-bg); color: var(--muted); font-size: .875em; line-height: 1.5;
+  }
+  .md-view .md-img[data-src] { cursor: pointer; }
+  .md-view .md-img[data-src]:hover { border-color: var(--accent); color: var(--accent); }
+  .md-view .md-img .md-img-tag { flex-shrink: 0; }
+  .md-view .md-img .md-img-src {
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    max-width: 44ch; font-family: Consolas, monospace;
+  }
+  /* 渲染过程中的提示条（文件过大 / 组件缺失 / 解析失败） */
+  .md-view .md-note {
+    margin: 0 0 1.1em; padding: 9px 12px; border-radius: 6px;
+    background: var(--item-bg); color: var(--muted); font-size: .875em; line-height: 1.6;
+  }
+
   /* 弹窗 */
   .modal-mask {
     display: none; position: fixed; inset: 0;
@@ -526,6 +603,11 @@ const PAGE_HTML = `<!DOCTYPE html>
       /* 不低于 16px —— iOS 在输入框字号小于 16px 时会把整页放大 */
       font-size: max(16px, var(--editor-fs, 14px));
     }
+    .md-view {
+      padding: 16px 14px;
+      /* 与编辑框同样的下限：iOS 下文小于 16px 看着费劲 */
+      font-size: max(16px, var(--editor-fs, 14px));
+    }
     /* 折行已强制开启，这个开关在手机上没有意义 */
     #wrapBtn { display: none; }
 
@@ -535,6 +617,7 @@ const PAGE_HTML = `<!DOCTYPE html>
     .modal .btns button { padding: 10px 14px; font-size: 14px; }
   }
 </style>
+<script src="/lib/markdown-it.min.js"></script>
 </head>
 <body>
 <script>
@@ -711,16 +794,19 @@ const PAGE_HTML = `<!DOCTYPE html>
       '<button class="tool-btn" id="fsMinus" onclick="stepFont(-1)" title="缩小正文字号">A−</button>' +
       '<button class="tool-btn" id="fsPlus" onclick="stepFont(1)" title="放大正文字号">A+</button>' +
       '<button class="tool-btn" id="wrapBtn" onclick="toggleWrap()" title="切换自动折行">自动折行</button>' +
+      '<button class="tool-btn" id="mdBtn" onclick="toggleMd()" title="切换 Markdown 渲染">渲染</button>' +
       '</div>' +
       '<button class="del-btn" id="delBtn" onclick="askDelete(current)">删除</button>' +
       '<button class="save-btn" id="saveBtn" onclick="saveFile()">保存</button>' +
       '</div>' +
-      '<textarea class="editor" id="editor" spellcheck="false"></textarea>';
+      '<textarea class="editor" id="editor" spellcheck="false"></textarea>' +
+      '<div class="md-view" id="mdView"></div>';
     const editor = document.getElementById('editor');
     editor.value = data.content;
     editor.addEventListener('input', () => { setDirty(true); });
     applyFontSize(editorFS);
     applyWrap(autoWrap);
+    applyMd(isMarkdownName(name));   // .md 打开即渲染，其余默认源码模式（按钮可手动切换）
     document.body.classList.add('mobile-reading');   // 手机端：切到正文屏
     renderList();
     // 手机上不自动聚焦：那会立刻弹出软键盘，把正文挤掉一半
@@ -1003,6 +1089,7 @@ const PAGE_HTML = `<!DOCTYPE html>
 
   function showPlaceholder() {
     document.body.classList.remove('mobile-reading');   // 回到列表屏（仅手机端有可见效果）
+    document.body.classList.remove('md-on');            // 正文区被清空了，渲染模式一并退掉
     document.getElementById('contentArea').innerHTML =
       '<div class="placeholder"><div style="font-size:40px;">📄</div>' +
       '<div>从列表里选择一个文档开始阅读 / 编辑</div>' +
@@ -1104,6 +1191,112 @@ const PAGE_HTML = `<!DOCTYPE html>
     applyFontSize(px);
     applyWrap(wp);
   }
+
+  // ---------- Markdown 渲染 ----------
+  // 渲染只影响"显示"：<textarea> 一直都在，内容也一直由它保管，
+  // 所以保存、Ctrl+S、脏数据标记、切换文件拦截这些逻辑一行都不用改。
+  const MD_EXTS = ['.md', '.markdown', '.mdown', '.mkd'];
+  const MD_MAX = 1024 * 1024;          // 超过 1MB 不渲染，避免打字时卡顿
+  const mdAvailable = !!window.markdownit;
+  let mdOn = false;                    // 当前是否处于渲染模式
+  let mdParser = null;
+
+  function isMarkdownName(name) {
+    const n = String(name || '').toLowerCase();
+    return MD_EXTS.some(function (x) { return n.endsWith(x); });
+  }
+  function mdSizeText(n) {
+    if (n < 1024) return n + ' B';
+    if (n < 1048576) return (n / 1024).toFixed(1) + ' KB';
+    return (n / 1048576).toFixed(1) + ' MB';
+  }
+
+  function makeMdParser() {
+    // html:false 是关键：笔记里写的原始 HTML 会被转义成文字显示，而不是当标签执行
+    const md = window.markdownit({ html: false, linkify: true, breaks: false, typographer: false });
+    // 外链一律新窗口打开：点一下就离开本应用的话，手机上退不回来
+    md.renderer.rules.link_open = function (tokens, idx, options, env, self) {
+      tokens[idx].attrSet('target', '_blank');
+      tokens[idx].attrSet('rel', 'noopener noreferrer');
+      return self.renderToken(tokens, idx, options);
+    };
+    // 图片一律不自动加载，先渲染成占位框，点一下才真的去请求：
+    // 远程图片会在你打开文件的瞬间就把 IP 和来源地址告诉图片服务器；
+    // 本地相对路径的图片本服务也不提供静态文件，没法直接显示。
+    md.renderer.rules.image = function (tokens, idx) {
+      const src = String(tokens[idx].attrGet('src') || '');
+      const alt = tokens[idx].content || '';
+      // 注意：这里刻意用字符串比较而不是正则 —— PAGE_HTML 是模板字符串，
+      // 正则里的反斜杠转义会在展开时被吃掉，正则就废了（踩过一次）。
+      const head = src.slice(0, 8).toLowerCase();
+      const remote = head.indexOf('http://') === 0 || head.indexOf('https://') === 0;
+      const label = alt ? alt + ' · ' + src : src;
+      const tip = remote ? '点击加载这张网络图片' : '本地图片暂不显示（本服务不提供静态文件）';
+      return '<span class="md-img"' + (remote ? ' data-src="' + escapeHtml(src) + '"' : '') +
+        ' title="' + escapeHtml(tip) + '">' +
+        '<span class="md-img-tag">' + (remote ? '🖼' : '📎') + '</span>' +
+        '<span class="md-img-src">' + escapeHtml(label) + '</span>' +
+        '</span>';
+    };
+    return md;
+  }
+
+  function renderMd() {
+    const view = document.getElementById('mdView');
+    const ed = document.getElementById('editor');
+    if (!view || !ed) return;
+    // 开头的 BOM 会干扰解析，先剥掉（markdown-it 的已知问题）。
+    // 用 charCodeAt 而不是正则里的 \uFEFF —— 同样是避免模板字符串吃转义
+    let text = String(ed.value || '');
+    if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
+    if (text.length > MD_MAX) {
+      view.innerHTML = '<div class="md-note">文件较大（' + mdSizeText(text.length) +
+        '），已跳过渲染以免卡顿。点「渲染」可切回源码查看。</div>';
+      return;
+    }
+    if (!mdAvailable) {
+      view.innerHTML = '<div class="md-note">渲染组件没有加载成功（缺少 lib/markdown-it.min.js），暂时只能看源码。</div>';
+      return;
+    }
+    if (!mdParser) mdParser = makeMdParser();
+    try {
+      view.innerHTML = mdParser.render(text) || '<div class="md-note">（空文件）</div>';
+    } catch (e) {
+      view.innerHTML = '<div class="md-note">渲染失败：' + escapeHtml(String((e && e.message) || e)) + '</div>';
+    }
+  }
+
+  function applyMd(on) {
+    mdOn = !!on;
+    document.body.classList.toggle('md-on', mdOn);
+    const btn = document.getElementById('mdBtn');
+    if (btn) {
+      btn.classList.toggle('on', mdOn);
+      btn.title = mdOn ? '当前为渲染模式（只读），点击切回源码' : '当前为源码模式，点击渲染 Markdown';
+    }
+    if (mdOn) renderMd();
+  }
+  // 手动切换只作用于当前打开的这份，不落盘：下次打开文件仍按扩展名自动决定
+  function toggleMd() { applyMd(!mdOn); }
+
+  // 渲染模式下，点图片占位框才真正加载
+  document.addEventListener('click', function (e) {
+    const el = (e.target && e.target.closest) ? e.target.closest('.md-img[data-src]') : null;
+    if (!el) return;
+    const src = el.getAttribute('data-src');
+    if (!src) return;
+    const img = document.createElement('img');
+    img.alt = '';
+    img.onerror = function () {
+      // 加载失败就把占位框放回去并写明原因，
+      // 否则这块地方会变成一片空白，看不出发生了什么
+      const box = el.querySelector('.md-img-src');
+      if (box) box.textContent = '加载失败：' + src;
+      img.replaceWith(el);
+    };
+    img.src = src;
+    el.replaceWith(img);
+  });
 
   // ---------- 日间 / 夜间主题 ----------
   function applyTheme(dark) {
@@ -1311,6 +1504,23 @@ const server = http.createServer((req, res) => {
   if (!isAuthed(req)) {
     res.writeHead(401, { 'Content-Type': 'text/plain; charset=utf-8' });
     res.end('未登录');
+    return;
+  }
+
+  // Markdown 渲染库（本地文件，不引 CDN：断网也要能用）
+  if (req.method === 'GET' && url.pathname === '/lib/markdown-it.min.js') {
+    fs.readFile(MD_LIB_PATH, (err, buf) => {
+      if (err) {
+        res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+        res.end('渲染组件不存在');
+        return;
+      }
+      res.writeHead(200, {
+        'Content-Type': 'application/javascript; charset=utf-8',
+        'Cache-Control': 'public, max-age=86400'
+      });
+      res.end(buf);
+    });
     return;
   }
 
